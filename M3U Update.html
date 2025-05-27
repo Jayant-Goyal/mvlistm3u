@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>M3U Playlist Editor</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 20px; }
+    #config, #editor { max-width: 600px; margin: auto; }
+    label { display: block; margin-top: 10px; }
+    input, button, textarea { width: 100%; padding: 8px; margin-top: 4px; }
+    #entries { margin-top: 20px; }
+    .entry { display: flex; margin-bottom: 8px; }
+    .entry input { flex: 1; margin-right: 8px; }
+    .entry button { flex: 0; }
+  </style>
+</head>
+<body>
+  <h1>M3U Playlist Editor</h1>
+  <div id="config">
+    <h2>GitHub Configuration</h2>
+    <label>Personal Access Token <small>(repo scope)</small><input id="token" type="password"></label>
+    <label>Repo Owner<input id="owner" type="text"></label>
+    <label>Repository Name<input id="repo" type="text"></label>
+    <label>File Path<input id="path" type="text" placeholder="playlist.m3u"></label>
+    <label>Branch<input id="branch" type="text" value="main"></label>
+    <button id="save-config">Save Configuration</button>
+    <button id="load-playlist">Load Playlist</button>
+  </div>
+
+  <div id="editor" style="display:none;">
+    <h2>Edit Playlist</h2>
+    <div id="entries"></div>
+    <button id="add-entry">Add Entry</button>
+    <button id="save-playlist">Save to GitHub</button>
+    <div id="status"></div>
+  </div>
+
+  <script>
+    // Utility to get/set config
+    const cfg = {
+      load() {
+        return {
+          token: localStorage.getItem('gh_token') || '',
+          owner: localStorage.getItem('gh_owner') || '',
+          repo: localStorage.getItem('gh_repo') || '',
+          path: localStorage.getItem('gh_path') || 'playlist.m3u',
+          branch: localStorage.getItem('gh_branch') || 'main'
+        };
+      },
+      save(o) {
+        localStorage.setItem('gh_token', o.token);
+        localStorage.setItem('gh_owner', o.owner);
+        localStorage.setItem('gh_repo', o.repo);
+        localStorage.setItem('gh_path', o.path);
+        localStorage.setItem('gh_branch', o.branch);
+      }
+    };
+
+    const elems = {
+      token: document.getElementById('token'),
+      owner: document.getElementById('owner'),
+      repo: document.getElementById('repo'),
+      path: document.getElementById('path'),
+      branch: document.getElementById('branch'),
+      saveConfig: document.getElementById('save-config'),
+      loadPlaylist: document.getElementById('load-playlist'),
+      editor: document.getElementById('editor'),
+      entries: document.getElementById('entries'),
+      addEntry: document.getElementById('add-entry'),
+      savePlaylist: document.getElementById('save-playlist'),
+      status: document.getElementById('status')
+    };
+
+    function populateConfig() {
+      const c = cfg.load();
+      elems.token.value = c.token;
+      elems.owner.value = c.owner;
+      elems.repo.value = c.repo;
+      elems.path.value = c.path;
+      elems.branch.value = c.branch;
+    }
+
+    elems.saveConfig.onclick = () => {
+      cfg.save({
+        token: elems.token.value.trim(),
+        owner: elems.owner.value.trim(),
+        repo: elems.repo.value.trim(),
+        path: elems.path.value.trim(),
+        branch: elems.branch.value.trim()
+      });
+      alert('Configuration saved');
+    };
+
+    let fileSha = '';
+
+    elems.loadPlaylist.onclick = async () => {
+      populateConfig();
+      const { token, owner, repo, path, branch } = cfg.load();
+      elems.status.textContent = 'Loading...';
+      try {
+        const res = await fetch(`https://api.github.com/repos/${owner}/${repo}/contents/${path}?ref=${branch}`, {
+          headers: { Authorization: 'token ' + token }
+        });
+        if (!res.ok) throw new Error(await res.text());
+        const data = await res.json();
+        fileSha = data.sha;
+        const content = atob(data.content.replace(/\n/g, ''));
+        showEditor(content);
+        elems.status.textContent = 'Playlist loaded';
+      } catch (err) {
+        elems.status.textContent = 'Error loading playlist: ' + err.message;
+      }
+    };
+
+    function showEditor(text) {
+      elems.editor.style.display = '';
+      elems.entries.innerHTML = '';
+      const lines = text.split(/\r?\n/).filter(l => l.trim());
+      for (let i = 0; i < lines.length; i++) {
+        if (lines[i].startsWith('#EXTINF:') && lines[i].includes(',')) {
+          const title = lines[i].split(',', 2)[1].trim();
+          const url = lines[i+1] || '';
+          addEntryRow(title, url);
+        }
+      }
+    }
+
+    function addEntryRow(title = '', url = '') {
+      const div = document.createElement('div');
+      div.className = 'entry';
+      const tIn = document.createElement('input'); tIn.placeholder = 'Title'; tIn.value = title;
+      const uIn = document.createElement('input'); uIn.placeholder = 'URL'; uIn.value = url;
+      const rm = document.createElement('button'); rm.textContent = '✕';
+      rm.onclick = () => div.remove();
+      div.append(tIn, uIn, rm);
+      elems.entries.append(div);
+    }
+
+    elems.addEntry.onclick = () => addEntryRow();
+
+    elems.savePlaylist.onclick = async () => {
+      const { token, owner, repo, path, branch } = cfg.load();
+      const entries = Array.from(elems.entries.children).map(div => {
+        const inputs = div.querySelectorAll('input');
+        return { title: inputs[0].value.trim(), url: inputs[1].value.trim() };
+      }).filter(e => e.title && e.url);
+
+      let newContent = '#EXTM3U\n';
+      entries.forEach(e => {
+        newContent += `#EXTINF:-1,${e.title}\n${e.url}\n`;
+      });
+
+      const payload = {
+        message: 'Update M3U playlist via web editor',
+        content: btoa(unescape(encodeURIComponent(newContent))),
+        sha: fileSha,
+        branch
+      };
+      elems.status.textContent = 'Saving...';
+      try {
+        const res = await fetch(`https://api.github.com/repos/${owner}/${repo}/contents/${path}`, {
+          method: 'PUT',
+          headers: {
+            Authorization: 'token ' + token,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(payload)
+        });
+        if (!res.ok) throw new Error(await res.text());
+        elems.status.textContent = 'Playlist saved successfully';
+      } catch (err) {
+        elems.status.textContent = 'Error saving playlist: ' + err.message;
+      }
+    };
+
+    // Initialize
+    populateConfig();
+  </script>
+</body>
+</html>
